@@ -2,7 +2,78 @@
 
 Este guia explica como hospedar o MCP Server do Baserow em um servidor remoto.
 
-## Opção 1: Cloudflare Workers (Recomendado - Gratuito)
+## Opção 1: Railway (Recomendado - Mais Simples)
+
+Railway é uma plataforma fácil de usar que suporta Node.js nativamente.
+
+### Passo a Passo
+
+1. **Crie uma conta no Railway**: https://railway.app
+
+2. **Conecte seu repositório GitHub**:
+   - Vá em "New Project" → "Deploy from GitHub repo"
+   - Selecione o repositório `MCP-Server-Custom-Baserow`
+
+3. **Configure as variáveis de ambiente**:
+   No painel do Railway, vá em "Variables" e adicione:
+
+   ```
+   BASEROW_API_TOKEN=seu-token-aqui
+   BASEROW_API_URL=https://api.baserow.io
+   TABLE_ID_MANUFACTURING_ORDERS=749415
+   TABLE_ID_FINISHED_GOODS=747400
+   TABLE_ID_MO_PARTS_USAGE=758739
+   TABLE_ID_FG_PARTS_MAPPING=748088
+   TABLE_ID_RAW_MATERIAL_LOTS=761349
+   TABLE_ID_LABEL_INVENTORY=759996
+   TABLE_ID_PARTS=744797
+   ```
+
+4. **Configure o comando de build e start**:
+   No Railway, vá em Settings e configure:
+   - Build Command: `npm install && npm run build:railway`
+   - Start Command: `npm run start:railway`
+
+5. **Deploy!**
+   O Railway vai fazer deploy automaticamente.
+
+### URL do Servidor
+
+Após o deploy, você receberá uma URL como:
+```
+https://mcp-server-custom-baserow-production.up.railway.app
+```
+
+### Configurar Claude Desktop
+
+Edite `%APPDATA%\Claude\claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "baserow-railway": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://SEU-APP.up.railway.app/mcp"]
+    }
+  }
+}
+```
+
+### Testar o Servidor
+
+```bash
+# Health check
+curl https://SEU-APP.up.railway.app/health
+
+# Testar JSON-RPC
+curl -X POST https://SEU-APP.up.railway.app/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+---
+
+## Opção 2: Cloudflare Workers (Gratuito)
 
 ### Pré-requisitos
 
@@ -26,22 +97,22 @@ wrangler secret put BASEROW_API_TOKEN
 # Cole seu token quando solicitado
 
 wrangler secret put TABLE_ID_MO
-# Digite: 744439
+# Digite: 749415
 
 wrangler secret put TABLE_ID_FG
-# Digite: 744438
+# Digite: 747400
 
 wrangler secret put TABLE_ID_PARTS_USAGE
-# Digite: 744445
+# Digite: 758739
 
 wrangler secret put TABLE_ID_FG_PARTS_MAPPING
-# Digite: 744442
+# Digite: 748088
 
 wrangler secret put TABLE_ID_RM_LOTS
-# Digite: 744446
+# Digite: 761349
 
 wrangler secret put TABLE_ID_LABEL_INVENTORY
-# Digite: 745389
+# Digite: 759996
 
 wrangler secret put TABLE_ID_PARTS
 # Digite: 744797
@@ -53,7 +124,6 @@ wrangler deploy
 ### Após o Deploy
 
 Você receberá uma URL como:
-
 ```
 https://baserow-mcp-server.seu-usuario.workers.dev
 ```
@@ -67,7 +137,7 @@ Edite `%APPDATA%\Claude\claude_desktop_config.json`:
   "mcpServers": {
     "baserow-remote": {
       "command": "npx",
-      "args": ["mcp-remote", "https://baserow-mcp-server.novaeo.workers.dev"]
+      "args": ["mcp-remote", "https://baserow-mcp-server.novaeo.workers.dev/mcp"]
     }
   }
 }
@@ -75,90 +145,23 @@ Edite `%APPDATA%\Claude\claude_desktop_config.json`:
 
 ---
 
-## Opção 2: Railway/Render/Fly.io
-
-Para plataformas como Railway, Render ou Fly.io, você precisa de uma versão do servidor que rode como HTTP server padrão.
-
-### Usando Express + SSE
-
-Crie um arquivo `server-remote.ts`:
-
-```typescript
-import express from "express";
-import { getMCPHandler } from "./src/mcp/handler.js";
-
-const app = express();
-app.use(express.json());
-
-const handler = getMCPHandler();
-
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
-
-// Tool call endpoint
-app.post("/tool/:name", async (req, res) => {
-  try {
-    const result = await handler.handleToolCall(req.params.name, req.body);
-    res.json(result);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`MCP Server running on port ${PORT}`);
-});
-```
-
----
-
-## Opção 3: GitHub Codespaces
-
-1. Crie um repositório no GitHub com seu código
-2. Abra em Codespaces
-3. Execute `npm run dev`
-4. Use a URL do Codespace com port forwarding
-
----
-
-## Opção 4: VPS (DigitalOcean, AWS, etc.)
+## Opção 3: VPS (DigitalOcean, AWS, etc.)
 
 ```bash
 # No servidor
-git clone seu-repo
-cd baserow-mcp-custom
+git clone https://github.com/rafaelpires010/MCP-Server-Custom-Baserow.git
+cd MCP-Server-Custom-Baserow
 npm install
-npm run build
+npm run build:railway
 
 # Com PM2 para manter rodando
 npm install -g pm2
-pm2 start dist/server-remote.js --name mcp-baserow
+pm2 start dist/server-railway.js --name mcp-baserow
 
-# Com systemd
-sudo nano /etc/systemd/system/mcp-baserow.service
-```
-
-Conteúdo do service:
-
-```ini
-[Unit]
-Description=Baserow MCP Server
-After=network.target
-
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/baserow-mcp-custom
-ExecStart=/usr/bin/node dist/server-remote.js
-Restart=on-failure
-Environment=NODE_ENV=production
-Environment=BASEROW_API_TOKEN=seu-token
-
-[Install]
-WantedBy=multi-user.target
+# Configurar variáveis de ambiente
+export BASEROW_API_TOKEN=seu-token
+export TABLE_ID_MANUFACTURING_ORDERS=749415
+# ... outras variáveis
 ```
 
 ---
@@ -167,27 +170,28 @@ WantedBy=multi-user.target
 
 ```bash
 # Health check
-curl https://seu-servidor.workers.dev/health
+curl https://seu-servidor.up.railway.app/health
 
-# Lista de tabelas (se tiver endpoint REST)
-curl -X POST https://seu-servidor.workers.dev/rpc \
+# Lista de ferramentas
+curl -X POST https://seu-servidor.up.railway.app/mcp \
   -H "Content-Type: application/json" \
-  -d '{"method": "list_tables", "params": {}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
 ---
 
 ## Notas Importantes
 
-1. **Segurança**: Em produção, adicione autenticação (API key, JWT, etc.)
-2. **Logs**: Configure logging para monitorar erros
-3. **Rate Limiting**: Adicione limitação de requisições
-4. **CORS**: Já configurado no worker, ajuste se necessário
+1. **Segurança**: Em produção, considere adicionar autenticação (API key, JWT)
+2. **Logs**: Railway mostra logs automaticamente no painel
+3. **Custos**: Railway tem plano grátis com limites, Cloudflare Workers também
 
 ---
 
-## Limitações
+## Tabela de Comparação
 
-- Cloudflare Workers tem limite de 10ms CPU time no plano grátis
-- Para operações longas, considere Workers Paid ($5/mês) ou outra plataforma
-- SSE tem limitações em alguns ambientes (use WebSocket se necessário)
+| Plataforma | Dificuldade | Gratuito | Persistência |
+|------------|-------------|----------|--------------|
+| Railway | Fácil | Sim (limites) | Sim |
+| Cloudflare Workers | Médio | Sim (limites) | Não |
+| VPS | Difícil | Não | Sim |

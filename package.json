@@ -6,8 +6,11 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "build:railway": "tsc && tsc server-railway.ts --outDir dist --esModuleInterop --module NodeNext --moduleResolution NodeNext --target ES2020",
     "start": "node dist/server.js",
+    "start:railway": "node dist/server-railway.js",
     "dev": "tsx src/server.ts",
+    "dev:railway": "tsx server-railway.ts",
     "clean": "rimraf dist",
     "typecheck": "tsc --noEmit"
   },
@@ -21,10 +24,14 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "cors": "^2.8.5",
     "dotenv": "^16.3.1",
+    "express": "^4.18.2",
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
     "@types/node": "^20.10.0",
     "rimraf": "^5.0.5",
     "tsx": "^4.6.2",
