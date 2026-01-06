@@ -1,16 +1,21 @@
 /**
  * Railway MCP Server
- * HTTP server with SSE support for remote MCP connections
+ * HTTP server with SSE support for remote MCP connections via mcp-remote
  */
 
-import express from 'express';
+import express, { Request, Response } from 'express';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Mcp-Session-Id'],
+  exposedHeaders: ['Mcp-Session-Id'],
+}));
 app.use(express.json());
 
 // ============================================================================
@@ -29,6 +34,9 @@ const TABLE_MAP: Record<string, string> = {
   label_inventory: process.env.TABLE_ID_LABEL_INVENTORY || '',
   parts: process.env.TABLE_ID_PARTS || '',
 };
+
+// Session storage for SSE connections
+const sessions = new Map<string, { res: Response; lastActivity: number }>();
 
 // ============================================================================
 // Baserow Client
@@ -551,7 +559,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
 
 interface JSONRPCRequest {
   jsonrpc: '2.0';
-  id: string | number;
+  id: string | number | null;
   method: string;
   params?: unknown;
 }
@@ -568,12 +576,14 @@ interface JSONRPCResponse {
 }
 
 async function handleJSONRPC(request: JSONRPCRequest): Promise<JSONRPCResponse> {
+  const id = request.id ?? null;
+
   try {
     switch (request.method) {
       case 'initialize':
         return {
           jsonrpc: '2.0',
-          id: request.id,
+          id,
           result: {
             protocolVersion: '2024-11-05',
             capabilities: { tools: {} },
@@ -582,32 +592,39 @@ async function handleJSONRPC(request: JSONRPCRequest): Promise<JSONRPCResponse> 
         };
 
       case 'notifications/initialized':
-        return { jsonrpc: '2.0', id: request.id, result: {} };
+        return { jsonrpc: '2.0', id, result: {} };
 
       case 'tools/list':
-        return { jsonrpc: '2.0', id: request.id, result: { tools: TOOLS } };
+        return { jsonrpc: '2.0', id, result: { tools: TOOLS } };
 
       case 'tools/call': {
         const params = request.params as { name: string; arguments: Record<string, unknown> };
         const toolResult = await handleToolCall(params.name, params.arguments || {});
         return {
           jsonrpc: '2.0',
-          id: request.id,
+          id,
           result: { content: [{ type: 'text', text: JSON.stringify(toolResult, null, 2) }] },
         };
       }
 
+      case 'ping':
+        return { jsonrpc: '2.0', id, result: {} };
+
       default:
+        // For notifications (no id), just return empty
+        if (request.id === null || request.id === undefined) {
+          return { jsonrpc: '2.0', id: null, result: {} };
+        }
         return {
           jsonrpc: '2.0',
-          id: request.id,
+          id,
           error: { code: -32601, message: `Method not found: ${request.method}` },
         };
     }
   } catch (error) {
     return {
       jsonrpc: '2.0',
-      id: request.id,
+      id,
       error: { code: -32603, message: error instanceof Error ? error.message : 'Internal error' },
     };
   }
@@ -618,16 +635,32 @@ async function handleJSONRPC(request: JSONRPCRequest): Promise<JSONRPCResponse> 
 // ============================================================================
 
 // Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', server: 'baserow-mcp-railway', tables: Object.keys(TABLE_MAP).length });
+app.get('/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    server: 'baserow-mcp-railway',
+    tables: Object.keys(TABLE_MAP).filter(k => TABLE_MAP[k]).length,
+    hasToken: !!BASEROW_API_TOKEN,
+  });
 });
 
-// MCP endpoint (JSON-RPC over HTTP POST)
-app.post('/mcp', async (req, res) => {
+// MCP endpoint - handles both POST (for Streamable HTTP) and GET (for SSE)
+// POST - JSON-RPC over HTTP (Streamable HTTP transport)
+app.post('/', async (req, res) => {
+  console.log('POST / received:', JSON.stringify(req.body));
+
   try {
     const response = await handleJSONRPC(req.body);
+
+    // Set session ID header if this is an initialize request
+    if (req.body.method === 'initialize') {
+      const sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      res.setHeader('Mcp-Session-Id', sessionId);
+    }
+
     res.json(response);
   } catch (error) {
+    console.error('Error handling POST:', error);
     res.status(500).json({
       jsonrpc: '2.0',
       id: null,
@@ -636,17 +669,94 @@ app.post('/mcp', async (req, res) => {
   }
 });
 
-// Root - show server info
+// Also support /mcp endpoint
+app.post('/mcp', async (req, res) => {
+  console.log('POST /mcp received:', JSON.stringify(req.body));
+
+  try {
+    const response = await handleJSONRPC(req.body);
+
+    if (req.body.method === 'initialize') {
+      const sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      res.setHeader('Mcp-Session-Id', sessionId);
+    }
+
+    res.json(response);
+  } catch (error) {
+    console.error('Error handling POST /mcp:', error);
+    res.status(500).json({
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32700, message: 'Parse error' },
+    });
+  }
+});
+
+// GET / - Server info and SSE endpoint
 app.get('/', (req, res) => {
+  const accept = req.headers.accept || '';
+
+  // If client wants SSE, set up SSE connection
+  if (accept.includes('text/event-stream')) {
+    console.log('SSE connection requested');
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    const sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    res.setHeader('Mcp-Session-Id', sessionId);
+
+    // Send initial connection event
+    res.write(`data: ${JSON.stringify({ type: 'connection', sessionId })}\n\n`);
+
+    // Store session
+    sessions.set(sessionId, { res, lastActivity: Date.now() });
+
+    // Keep connection alive
+    const keepAlive = setInterval(() => {
+      res.write(': keepalive\n\n');
+    }, 30000);
+
+    req.on('close', () => {
+      clearInterval(keepAlive);
+      sessions.delete(sessionId);
+      console.log(`SSE session ${sessionId} closed`);
+    });
+
+    return;
+  }
+
+  // Otherwise return server info
   res.json({
     name: 'Baserow MCP Server (Railway)',
     version: '1.0.0',
+    protocol: 'MCP 2024-11-05',
+    transport: 'Streamable HTTP',
     endpoints: {
-      health: '/health',
+      root: '/ (POST for JSON-RPC, GET for SSE)',
       mcp: '/mcp (POST)',
+      health: '/health (GET)',
     },
-    usage: 'Use mcp-remote to connect: npx mcp-remote https://your-app.railway.app/mcp',
+    usage: 'Use mcp-remote to connect: npx mcp-remote https://your-app.railway.app',
+    tables: Object.keys(TABLE_MAP).filter(k => TABLE_MAP[k]),
   });
+});
+
+// DELETE - Close session
+app.delete('/', (req, res) => {
+  const sessionId = req.headers['mcp-session-id'] as string;
+  if (sessionId && sessions.has(sessionId)) {
+    sessions.delete(sessionId);
+    console.log(`Session ${sessionId} deleted`);
+  }
+  res.status(204).send();
+});
+
+// OPTIONS - CORS preflight
+app.options('*', (_req, res) => {
+  res.status(204).send();
 });
 
 // ============================================================================
@@ -657,5 +767,7 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`MCP Server running on port ${PORT}`);
-  console.log(`Tables configured: ${Object.entries(TABLE_MAP).filter(([_, v]) => v).map(([k]) => k).join(', ')}`);
+  console.log(`Tables configured: ${Object.entries(TABLE_MAP).filter(([_, v]) => v).map(([k]) => k).join(', ') || 'None'}`);
+  console.log(`Baserow API Token: ${BASEROW_API_TOKEN ? 'Configured' : 'NOT CONFIGURED'}`);
+  console.log(`Endpoints: POST / (JSON-RPC), GET / (SSE), POST /mcp, GET /health`);
 });
